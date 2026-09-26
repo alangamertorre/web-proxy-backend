@@ -45,12 +45,9 @@ function cargarProxy(urlCompleta, hostname) {
   hint.classList.remove("is-error");
   currentAddress.textContent = hostname.toUpperCase();
   emptyState.setAttribute("hidden", "true"); // Corrección de accesibilidad para ocultar el estado vacío
-  const fetchOk = fetchWeb_Backend(encodeURIComponent(urlCompleta));
 
-  if (fetchOk) {
-    // CORRECCIÓN: Apunta a tu backend local, pasándole la URL como query param
-    frame.src = `/proxy?url=${encodeURIComponent(urlCompleta)}`;
-  }
+  // CORRECCIÓN: Apunta a tu backend local, pasándole la URL como query param
+  frame.src = `/proxy?url=${encodeURIComponent(urlCompleta)}`;
 }
 
 async function fetchWeb_Backend(src) {}
