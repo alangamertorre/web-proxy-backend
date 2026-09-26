@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="es">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#111412">
+    <title>Web proxy</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="./style.css">
+</head>
+
+<body>
+    <main class="workspace">
+        <header class="topbar">
+            <a class="wordmark" href="/" aria-label="Web Relay, inicio">
+                <span class="mark" aria-hidden="true"><span></span><span></span><span></span></span>
+                <span>WEB<span class="wordmark-slash">/</span>PROXY</span>
+            </a>
+            <div class="status"><span class="status-dot"></span> INTERFAZ LOCAL</div>
+        </header>
+
+        <section class="browser" aria-labelledby="page-title">
+            <div class="intro">
+                <div class="eyebrow"><span>01</span> NAVEGADOR WEB</div>
+                <h1 id="page-title">Tu ventana<br><span>a la web.</span></h1>
+                <p class="intro-note">Escribe una dirección para abrirla en el visor.</p>
+            </div>
+
+            <form class="address-form" id="address-form">
+                <label for="url-input">DIRECCIÓN</label>
+                <div class="input-row">
+                    <div class="input-wrap">
+                        <svg class="globe-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                            <circle cx="12" cy="12" r="9" />
+                            <path
+                                d="M3.5 12h17M12 3c2.2 2.4 3.2 5.4 3.2 9s-1 6.6-3.2 9c-2.2-2.4-3.2-5.4-3.2-9s1-6.6 3.2-9Z" />
+                        </svg>
+                        <input id="url-input" name="url" type="url" placeholder="https://wikipedia.org"
+                            autocomplete="url" required>
+                    </div>
+                    <button type="submit">
+                        <span>Navegar</span>
+                        <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                            <path d="M4 10h11m-4-4 4 4-4 4" />
+                        </svg>
+                    </button>
+                </div>
+                <p class="form-hint" id="form-hint" aria-live="polite">Se aceptan direcciones que empiecen por https://
+                    o http://</p>
+            </form>
+
+            <section class="viewer" aria-label="Visor de páginas web">
+                <div class="viewer-bar">
+                    <div class="window-dots" aria-hidden="true"><i></i><i></i><i></i></div>
+                    <div class="viewer-label"><span class="viewer-lock" aria-hidden="true">◈</span><span
+                            id="current-address">ESPERANDO DIRECCIÓN</span></div>
+                    <span class="viewer-index">VIEW&nbsp; 01</span>
+                </div>
+                <div class="frame-wrap" id="frame-wrap">
+                    <div class="empty-state" id="empty-state" aria-hidden="false">
+                        <div class="empty-glyph" aria-hidden="true"><span></span><span></span><span></span><span></span>
+                        </div>
+                        <p>EL VISOR ESTÁ EN ESPERA</p>
+                        <span>La página aparecerá aquí</span>
+                    </div>
+                    <iframe id="web-frame" title="Página web solicitada" src="about:blank"
+                        referrerpolicy="no-referrer"></iframe>
+                </div>
+            </section>
+        </section>
+
+        <footer class="footer"><span>WEB RELAY <span class="footer-separator">/</span> 2026</span><span>VISOR DE
+                CONTENIDO</span></footer>
+    </main>
+
+    <script src="../src/index.js" type="module">
+    </script>
+
+</body>
+
+</html>
