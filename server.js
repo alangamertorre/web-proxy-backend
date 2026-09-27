@@ -31,78 +31,93 @@ app.use((request, response, next) => {
   next();
 });
 
-app.all(
-  "/proxy",
-  express.raw({ type: "*/*", limit: "25mb" }),
-  async (request, response) => {
-    let destination;
+app.get(["/", "/health"], (request, response) => {
+  response.status(200).json({ status: "ok" });
+});
 
-    try {
-      destination = new URL(request.query.url);
-    } catch {
-      return response.status(400).json({ error: "La URL no es válida." });
-    }
+const parseRequestUrl = (request) => {
+  if (request.query.url) return new URL(request.query.url);
 
-    if (!["http:", "https:"].includes(destination.protocol)) {
-      return response
-        .status(400)
-        .json({ error: "Solo se permiten URLs HTTP y HTTPS." });
-    }
+  const match = request.path.match(/^\/proxy\/(https?)\/([^/]+)(\/.*)?$/);
+  if (!match) throw new Error("La URL no es válida.");
 
-    try {
-      const headers = new Headers();
-      for (const [name, value] of Object.entries(request.headers)) {
-        if (
-          [
-            "host",
-            "connection",
-            "content-length",
-            "accept-encoding",
-            "origin",
-            "referer",
-            "cookie",
-          ].includes(name.toLowerCase()) ||
-          name.toLowerCase().startsWith("sec-fetch-")
-        )
-          continue;
-        if (Array.isArray(value)) headers.set(name, value.join(", "));
-        else if (value) headers.set(name, value);
-      }
-      headers.set("Origin", destination.origin);
-      headers.set("Referer", destination.href);
+  return new URL(
+    `${match[1]}://${match[2]}${match[3] || "/"}${request.url.slice(request.path.length)}`,
+  );
+};
 
-      const upstream = await fetch(destination, {
-        method: request.method,
-        headers,
-        body: ["GET", "HEAD"].includes(request.method)
-          ? undefined
-          : request.body,
-        redirect: "follow",
-        signal: AbortSignal.timeout(30000),
-      });
+const makeProxyUrl = (destination) =>
+  `${proxyOrigin}/proxy/${destination.protocol.slice(0, -1)}/${destination.host}${destination.pathname}${destination.search}`;
 
-      const contentType = upstream.headers.get("content-type") || "";
+const proxyRequest = async (request, response) => {
+  let destination;
+
+  try {
+    destination = parseRequestUrl(request);
+  } catch {
+    return response.status(400).json({ error: "La URL no es válida." });
+  }
+
+  if (!["http:", "https:"].includes(destination.protocol)) {
+    return response
+      .status(400)
+      .json({ error: "Solo se permiten URLs HTTP y HTTPS." });
+  }
+
+  try {
+    const headers = new Headers();
+    for (const [name, value] of Object.entries(request.headers)) {
+      const lowerName = name.toLowerCase();
       if (
-        contentType.includes("text/html") ||
-        contentType.includes("application/xhtml+xml")
-      ) {
-        const document = cheerio.load(await upstream.text());
-        document(
-          'meta[http-equiv="Content-Security-Policy"], meta[http-equiv="X-Frame-Options"]',
-        ).remove();
-        document("base").remove();
-        document("head").prepend(
-          document("<base>").attr("href", destination.href),
-        );
+        [
+          "host",
+          "connection",
+          "content-length",
+          "accept-encoding",
+          "origin",
+          "referer",
+          "cookie",
+        ].includes(lowerName) ||
+        lowerName.startsWith("sec-fetch-")
+      )
+        continue;
+      if (Array.isArray(value)) headers.set(name, value.join(", "));
+      else if (value) headers.set(name, value);
+    }
+    headers.set("Origin", destination.origin);
+    headers.set("Referer", destination.href);
 
-        const bridge = `(() => {
-        const proxyOrigin = ${JSON.stringify(proxyOrigin)};
+    const upstream = await fetch(destination, {
+      method: request.method,
+      headers,
+      body: ["GET", "HEAD", "OPTIONS"].includes(request.method)
+        ? undefined
+        : request.body,
+      redirect: "follow",
+      signal: AbortSignal.timeout(30000),
+    });
+
+    const contentType = upstream.headers.get("content-type") || "";
+    if (
+      contentType.includes("text/html") ||
+      contentType.includes("application/xhtml+xml")
+    ) {
+      const document = cheerio.load(await upstream.text());
+      document(
+        'meta[http-equiv="Content-Security-Policy"], meta[http-equiv="X-Frame-Options"]',
+      ).remove();
+      document("base").remove();
+      document("head").prepend(
+        document("<base>").attr("href", destination.href),
+      );
+
+      const bridge = `(() => {
         const siteBase = ${JSON.stringify(destination.href)};
         const proxyUrl = (value) => {
           let target;
           try { target = new URL(value, siteBase); } catch { return value; }
-          if (!['http:', 'https:'].includes(target.protocol) || target.origin === proxyOrigin) return value;
-          return proxyOrigin + '/proxy?url=' + encodeURIComponent(target.href);
+          if (!['http:', 'https:'].includes(target.protocol) || target.origin === ${JSON.stringify(proxyOrigin)}) return value;
+          return ${JSON.stringify(proxyOrigin)} + '/proxy/' + target.protocol.slice(0, -1) + '/' + target.host + target.pathname + target.search;
         };
         const originalOpen = XMLHttpRequest.prototype.open;
         XMLHttpRequest.prototype.open = function(method, url, ...args) {
@@ -116,55 +131,90 @@ app.all(
           return originalFetch.call(this, proxyUrl(input), init);
         };
       })();`;
-        document("head").prepend(document("<script>").text(bridge));
+      document("head").prepend(document("<script>").text(bridge));
 
-        document("a[href], area[href], form[action]").each((_, element) => {
-          const attribute = element.name === "form" ? "action" : "href";
-          try {
-            const link = new URL(
-              document(element).attr(attribute),
-              destination,
-            );
-            if (["http:", "https:"].includes(link.protocol)) {
-              document(element).attr(
-                attribute,
-                `${proxyOrigin}/proxy?url=${encodeURIComponent(link.href)}`,
-              );
-            }
-          } catch {
-            // Deja intactos los destinos que no sean URLs HTTP o HTTPS.
+      document("[src], [href], [poster], [action]").each((_, element) => {
+        const tag = element.name;
+        const attribute =
+          tag === "form"
+            ? "action"
+            : tag === "video"
+              ? "poster"
+              : [
+                    "script",
+                    "img",
+                    "iframe",
+                    "source",
+                    "audio",
+                    "video",
+                    "input",
+                    "embed",
+                    "track",
+                    "link",
+                  ].includes(tag)
+                ? tag === "link"
+                  ? "href"
+                  : "src"
+                : "";
+        if (!attribute) return;
+
+        const rawUrl = document(element).attr(attribute);
+        try {
+          const resource = new URL(rawUrl, destination);
+          if (["http:", "https:"].includes(resource.protocol)) {
+            document(element).attr(attribute, makeProxyUrl(resource));
           }
-        });
-
-        response.status(upstream.status).type("html").send(document.html());
-        return;
-      }
-
-      const body = Buffer.from(await upstream.arrayBuffer());
-      for (const [name, value] of upstream.headers) {
-        if (
-          [
-            "content-encoding",
-            "content-length",
-            "transfer-encoding",
-            "content-security-policy",
-            "x-frame-options",
-            "set-cookie",
-          ].includes(name.toLowerCase())
-        )
-          continue;
-        response.set(name, value);
-      }
-      response.status(upstream.status).send(body);
-    } catch (error) {
-      const timedOut = error.name === "TimeoutError";
-      response.status(timedOut ? 504 : 502).json({
-        error: timedOut
-          ? "El sitio tardó demasiado en responder."
-          : "No se pudo conectar con el sitio de destino.",
+        } catch {
+          // Conserva valores especiales que no sean URLs web.
+        }
       });
+
+      document("a[href], area[href]").each((_, element) => {
+        try {
+          const link = new URL(document(element).attr("href"), destination);
+          if (["http:", "https:"].includes(link.protocol)) {
+            document(element).attr("href", makeProxyUrl(link));
+          }
+        } catch {
+          // Conserva enlaces especiales como mailto:.
+        }
+      });
+
+      response.status(upstream.status).type("html").send(document.html());
+      return;
     }
-  },
+
+    const body = Buffer.from(await upstream.arrayBuffer());
+    for (const [name, value] of upstream.headers) {
+      if (
+        [
+          "content-encoding",
+          "content-length",
+          "transfer-encoding",
+          "content-security-policy",
+          "x-frame-options",
+          "set-cookie",
+        ].includes(name.toLowerCase())
+      )
+        continue;
+      response.set(name, value);
+    }
+    response.status(upstream.status).send(body);
+  } catch (error) {
+    const timedOut = error.name === "TimeoutError";
+    response.status(timedOut ? 504 : 502).json({
+      error: timedOut
+        ? "El sitio tardó demasiado en responder."
+        : "No se pudo conectar con el sitio de destino.",
+    });
+  }
+};
+
+app.all("/proxy", express.raw({ type: "*/*", limit: "25mb" }), proxyRequest);
+app.all(
+  /^\/proxy\/(https?)\/([^/]+)(\/.*)?$/,
+  express.raw({ type: "*/*", limit: "25mb" }),
+  proxyRequest,
 );
 
 app.listen(port, "0.0.0.0", () => {
