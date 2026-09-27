@@ -1,5 +1,6 @@
 const express = require("express");
 const cheerio = require("cheerio");
+const { init, parse } = require("es-module-lexer");
 
 const app = express();
 const port = process.env.PORT || 8080;
@@ -48,6 +49,36 @@ const parseRequestUrl = (request) => {
 
 const makeProxyUrl = (destination) =>
   `${proxyOrigin}/proxy/${destination.protocol.slice(0, -1)}/${destination.host}${destination.pathname}${destination.search}`;
+
+const rewriteModuleImports = async (source, destination) => {
+  await init;
+  const [imports] = parse(source);
+  const replacements = imports
+    .filter(
+      ({ n }) =>
+        typeof n === "string" &&
+        /^(?:[a-z][a-z\d+.-]*:|\/\/|\.{1,2}\/|\/)/i.test(n),
+    )
+    .map(({ s, e, n }) => {
+      try {
+        const importedUrl = new URL(n, destination);
+        if (!["http:", "https:"].includes(importedUrl.protocol)) return null;
+        return { start: s, end: e, value: makeProxyUrl(importedUrl) };
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean)
+    .sort((left, right) => right.start - left.start);
+
+  for (const replacement of replacements) {
+    source =
+      source.slice(0, replacement.start) +
+      replacement.value +
+      source.slice(replacement.end);
+  }
+  return source;
+};
 
 const proxyRequest = async (request, response) => {
   let destination;
@@ -158,9 +189,11 @@ const proxyRequest = async (request, response) => {
                 : "";
         if (!attribute) return;
 
-        const rawUrl = document(element).attr(attribute);
         try {
-          const resource = new URL(rawUrl, destination);
+          const resource = new URL(
+            document(element).attr(attribute),
+            destination,
+          );
           if (["http:", "https:"].includes(resource.protocol)) {
             document(element).attr(attribute, makeProxyUrl(resource));
           }
@@ -181,6 +214,16 @@ const proxyRequest = async (request, response) => {
       });
 
       response.status(upstream.status).type("html").send(document.html());
+      return;
+    }
+
+    if (
+      contentType.includes("javascript") ||
+      contentType.includes("ecmascript")
+    ) {
+      const source = await upstream.text();
+      const rewritten = await rewriteModuleImports(source, destination);
+      response.status(upstream.status).type(contentType).send(rewritten);
       return;
     }
 
