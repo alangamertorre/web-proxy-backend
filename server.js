@@ -20,7 +20,7 @@ app.use((request, response, next) => {
   if (request.method === "OPTIONS") {
     response.set(
       "Access-Control-Allow-Methods",
-      "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+      "GET, POST, PUT, PATCH, DELETE, aOPTIONS",
     );
     response.set(
       "Access-Control-Allow-Headers",
