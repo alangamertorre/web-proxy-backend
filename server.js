@@ -1,4 +1,5 @@
 const express = require("express");
+const cheerio = require("cheerio");
 
 const app = express();
 const port = process.env.PORT || 8080;
@@ -58,16 +59,28 @@ app.get("/proxy", async (request, response) => {
         .json({ error: "El destino no devolvió una página HTML." });
     }
 
-    let html = await upstream.text();
-    const baseTag =
-      '<base href="' + destination.href.replace(/&/g, "&amp;") + '">';
-    if (/<head(?:\s[^>]*)?>/i.test(html)) {
-      html = html.replace(/<head(?:\s[^>]*)?>/i, (head) => head + baseTag);
-    } else {
-      html = baseTag + html;
-    }
+    const document = cheerio.load(await upstream.text());
+    document(
+      'meta[http-equiv="Content-Security-Policy"], meta[http-equiv="X-Frame-Options"]',
+    ).remove();
+    document("base").remove();
+    document("head").prepend(document("<base>").attr("href", destination.href));
 
-    response.type("html").send(html);
+    document("a[href], area[href]").each((_, element) => {
+      try {
+        const link = new URL(document(element).attr("href"), destination);
+        if (["http:", "https:"].includes(link.protocol)) {
+          document(element).attr(
+            "href",
+            `/proxy?url=${encodeURIComponent(link.href)}`,
+          );
+        }
+      } catch {
+        // Deja intactos enlaces que no sean URLs HTTP o HTTPS.
+      }
+    });
+
+    response.type("html").send(document.html());
   } catch (error) {
     const timedOut = error.name === "TimeoutError";
     response.status(timedOut ? 504 : 502).json({
