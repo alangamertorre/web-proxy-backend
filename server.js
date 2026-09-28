@@ -214,12 +214,40 @@ const proxyRequest = async (request, response) => {
           }
           return originalFetch.call(this, proxyUrl(input), init);
         };
+        // Algunos botones abren el destino mediante window.open en vez de href.
+        const originalOpenWindow = window.open;
+        window.open = function(url, ...args) {
+          return originalOpenWindow.call(this, url ? proxyUrl(url) : url, ...args);
+        };
+        // Convierte atributos que suelen usar los handlers de botones.
+        const rewriteElementUrls = (element) => {
+          for (const attribute of ['href', 'data-href', 'data-url']) {
+            if (!element.hasAttribute(attribute)) continue;
+            const value = element.getAttribute(attribute);
+            element.setAttribute(attribute, proxyUrl(value));
+          }
+        };
+        // También cubre botones y enlaces creados después de cargar el documento.
+        const observer = new MutationObserver((mutations) => {
+          for (const mutation of mutations) {
+            for (const element of mutation.addedNodes) {
+              if (element.nodeType !== Node.ELEMENT_NODE) continue;
+              rewriteElementUrls(element);
+              element.querySelectorAll('[href], [data-href], [data-url]')
+                .forEach(rewriteElementUrls);
+            }
+          }
+        });
+        observer.observe(document.documentElement, { childList: true, subtree: true });
         // Poki puede crear o cambiar enlaces después de cargar el HTML.
         document.addEventListener('click', (event) => {
-          const anchor = event.target.closest('a[href]');
-          if (!anchor || event.defaultPrevented || event.button !== 0) return;
+          const clickedElement = event.target instanceof Element
+            ? event.target
+            : event.target.parentElement;
+          const link = clickedElement?.closest('[href], [data-href], [data-url]');
+          if (!link || event.defaultPrevented || event.button !== 0) return;
           if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-          anchor.href = proxyUrl(anchor.href);
+          rewriteElementUrls(link);
         }, true);
       })();`;
       document("head").prepend(document("<script>").text(bridge));
