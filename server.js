@@ -80,6 +80,24 @@ const parseRequestUrl = (request) => {
 const makeProxyUrl = (destination) =>
   `${proxyOrigin}/proxy/${destination.protocol.slice(0, -1)}/${destination.host}${destination.pathname}${destination.search}`;
 
+// Recupera la URL remota de una página que llegó mediante una ruta del proxy.
+const getOriginalReferer = (request) => {
+  try {
+    const referer = new URL(request.headers.referer);
+    if (referer.origin !== proxyOrigin) return null;
+
+    const queryDestination = referer.searchParams.get("url");
+    if (queryDestination) return new URL(queryDestination);
+
+    const match = referer.pathname.match(/^\/proxy\/(https?)\/([^/]+)(\/.*)?$/);
+    if (!match) return null;
+
+    return new URL(`${match[1]}://${match[2]}${match[3] || "/"}`);
+  } catch {
+    return null;
+  }
+};
+
 // Reescribe imports relativos o absolutos encontrados en módulos JS.
 const rewriteModuleImports = async (source, destination) => {
   // es-module-lexer necesita inicializarse antes de llamar a parse.
@@ -172,10 +190,10 @@ const proxyRequest = async (request, response) => {
     if (isPokiHost && request.headers.cookie) {
       headers.set("Cookie", request.headers.cookie);
     }
-    // El sitio remoto recibe un origen coherente con el destino solicitado.
-    headers.set("Origin", destination.origin);
-    // Referer ayuda a sitios que esperan navegación desde su propia página.
-    headers.set("Referer", destination.href);
+    // Las APIs externas necesitan ver el origen de la página remota, no el suyo.
+    const originalReferer = getOriginalReferer(request) || destination;
+    headers.set("Origin", originalReferer.origin);
+    headers.set("Referer", originalReferer.href);
 
     // fetch realiza la petición de salida y sigue redirecciones del upstream.
     const upstream = await fetch(destination, {
@@ -222,7 +240,11 @@ const proxyRequest = async (request, response) => {
         const proxyUrl = (value) => {
           let target;
           try { target = new URL(value, siteBase); } catch { return value; }
-          if (!['http:', 'https:'].includes(target.protocol) || target.origin === ${JSON.stringify(proxyOrigin)}) return value;
+          if (!['http:', 'https:'].includes(target.protocol)) return value;
+          if (target.origin === ${JSON.stringify(proxyOrigin)}) {
+            if (target.pathname.startsWith('/proxy/')) return value;
+            target = new URL(target.pathname + target.search, siteBase);
+          }
           return ${JSON.stringify(proxyOrigin)} + '/proxy/' + target.protocol.slice(0, -1) + '/' + target.host + target.pathname + target.search;
         };
         const NativeWebSocket = window.WebSocket;
@@ -230,6 +252,8 @@ const proxyRequest = async (request, response) => {
           constructor(value, protocols) {
             let target;
             try { target = new URL(value, siteBase); } catch { super(value, protocols); return; }
+            if (target.protocol === 'http:') target.protocol = 'ws:';
+            if (target.protocol === 'https:') target.protocol = 'wss:';
             if (!['ws:', 'wss:'].includes(target.protocol)) {
               super(value, protocols);
               return;
@@ -256,24 +280,34 @@ const proxyRequest = async (request, response) => {
         };
         // Convierte atributos que suelen usar los handlers de botones.
         const rewriteElementUrls = (element) => {
-          for (const attribute of ['href', 'data-href', 'data-url']) {
+          for (const attribute of ['href', 'src', 'poster', 'action', 'data-href', 'data-url']) {
             if (!element.hasAttribute(attribute)) continue;
             const value = element.getAttribute(attribute);
-            element.setAttribute(attribute, proxyUrl(value));
+            const rewritten = proxyUrl(value);
+            if (rewritten !== value) element.setAttribute(attribute, rewritten);
           }
         };
         // También cubre botones y enlaces creados después de cargar el documento.
         const observer = new MutationObserver((mutations) => {
           for (const mutation of mutations) {
+            if (mutation.type === 'attributes') {
+              rewriteElementUrls(mutation.target);
+              continue;
+            }
             for (const element of mutation.addedNodes) {
               if (element.nodeType !== Node.ELEMENT_NODE) continue;
               rewriteElementUrls(element);
-              element.querySelectorAll('[href], [data-href], [data-url]')
+              element.querySelectorAll('[href], [src], [poster], [action], [data-href], [data-url]')
                 .forEach(rewriteElementUrls);
             }
           }
         });
-        observer.observe(document.documentElement, { childList: true, subtree: true });
+        observer.observe(document.documentElement, {
+          attributes: true,
+          attributeFilter: ['href', 'src', 'poster', 'action', 'data-href', 'data-url'],
+          childList: true,
+          subtree: true
+        });
         // Poki puede crear o cambiar enlaces después de cargar el HTML.
         document.addEventListener('click', (event) => {
           const clickedElement = event.target instanceof Element
