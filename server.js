@@ -1,5 +1,6 @@
 // Express expone el servidor HTTP y sus rutas.
 const express = require("express");
+const { WebSocket, WebSocketServer } = require("ws");
 // Cheerio permite analizar y modificar el HTML recibido del sitio remoto.
 const cheerio = require("cheerio");
 // El lexer localiza imports de JavaScript sin tener que interpretar el programa.
@@ -17,6 +18,11 @@ const proxyOrigin = (
   process.env.PUBLIC_URL ||
   "https://web-proxy-backend-production.up.railway.app"
 ).replace(/\/$/, "");
+const proxyWebSocketOrigin = proxyOrigin.replace(/^http/, "ws");
+const webSocketServer = new WebSocketServer({
+  noServer: true,
+  handleProtocols: (protocols) => protocols.values().next().value || false,
+});
 
 // Este middleware configura CORS antes de llegar a cualquier ruta.
 app.use((request, response, next) => {
@@ -132,6 +138,11 @@ const proxyRequest = async (request, response) => {
       .json({ error: "Solo se permiten URLs HTTP y HTTPS." });
   }
 
+  // Solo reenviamos cookies a Poki, nunca a destinos arbitrarios del proxy.
+  const isPokiHost =
+    destination.hostname === "poki.com" ||
+    destination.hostname.endsWith(".poki.com");
+
   // Todo lo que pueda fallar al contactar o transformar el sitio remoto
   // se convierte en una respuesta controlada para no romper el proceso.
   try {
@@ -157,6 +168,10 @@ const proxyRequest = async (request, response) => {
       if (Array.isArray(value)) headers.set(name, value.join(", "));
       else if (value) headers.set(name, value);
     }
+    // La sesión del menú de Poki depende de estas cookies anónimas o de usuario.
+    if (isPokiHost && request.headers.cookie) {
+      headers.set("Cookie", request.headers.cookie);
+    }
     // El sitio remoto recibe un origen coherente con el destino solicitado.
     headers.set("Origin", destination.origin);
     // Referer ayuda a sitios que esperan navegación desde su propia página.
@@ -173,6 +188,13 @@ const proxyRequest = async (request, response) => {
       redirect: "follow",
       signal: AbortSignal.timeout(30000),
     });
+
+    // Las cookies del upstream llegan al navegador bajo el dominio del proxy.
+    if (isPokiHost && typeof upstream.headers.getSetCookie === "function") {
+      for (const cookie of upstream.headers.getSetCookie()) {
+        response.append("Set-Cookie", cookie.replace(/;\s*Domain=[^;]*/i, ""));
+      }
+    }
 
     // El tipo determina si el cuerpo necesita reescritura o puede copiarse.
     const contentType = upstream.headers.get("content-type") || "";
@@ -202,6 +224,19 @@ const proxyRequest = async (request, response) => {
           try { target = new URL(value, siteBase); } catch { return value; }
           if (!['http:', 'https:'].includes(target.protocol) || target.origin === ${JSON.stringify(proxyOrigin)}) return value;
           return ${JSON.stringify(proxyOrigin)} + '/proxy/' + target.protocol.slice(0, -1) + '/' + target.host + target.pathname + target.search;
+        };
+        const NativeWebSocket = window.WebSocket;
+        window.WebSocket = class ProxyWebSocket extends NativeWebSocket {
+          constructor(value, protocols) {
+            let target;
+            try { target = new URL(value, siteBase); } catch { super(value, protocols); return; }
+            if (!['ws:', 'wss:'].includes(target.protocol)) {
+              super(value, protocols);
+              return;
+            }
+            const socketUrl = ${JSON.stringify(proxyWebSocketOrigin)} + '/proxy/' + target.protocol.slice(0, -1) + '/' + target.host + target.pathname + target.search;
+            super(socketUrl, protocols);
+          }
         };
         const originalOpen = XMLHttpRequest.prototype.open;
         XMLHttpRequest.prototype.open = function(method, url, ...args) {
@@ -361,7 +396,72 @@ app.all(
 );
 
 // Escuchamos en todas las interfaces para funcionar dentro de contenedores.
-app.listen(port, "0.0.0.0", () => {
+const server = app.listen(port, "0.0.0.0", () => {
   // Este mensaje aparece en los logs de desarrollo y del proveedor de despliegue.
   console.log("Proxy HTTP activo en el puerto " + port);
+});
+
+// Solo aceptamos WebSockets destinados al servidor oficial de Bloxd.io.
+server.on("upgrade", (request, socket, head) => {
+  let destination;
+
+  try {
+    const requestUrl = new URL(request.url, proxyOrigin);
+    const match = requestUrl.pathname.match(
+      /^\/proxy\/(wss?)\/([^/]+)(\/.*)?$/,
+    );
+    if (!match) throw new Error("Ruta WebSocket no válida.");
+
+    destination = new URL(
+      `${match[1]}://${match[2]}${match[3] || "/"}${requestUrl.search}`,
+    );
+  } catch {
+    socket.destroy();
+    return;
+  }
+
+  const isBloxdHost =
+    destination.hostname === "bloxd.io" ||
+    destination.hostname.endsWith(".bloxd.io");
+  if (!isBloxdHost) {
+    socket.destroy();
+    return;
+  }
+
+  webSocketServer.handleUpgrade(request, socket, head, (client) => {
+    const requestedProtocols = request.headers["sec-websocket-protocol"]
+      ?.split(",")
+      .map((protocol) => protocol.trim())
+      .filter(Boolean);
+    const headers = { Origin: "https://bloxd.io" };
+    if (request.headers.cookie) headers.Cookie = request.headers.cookie;
+
+    const upstream = new WebSocket(destination.href, requestedProtocols, {
+      headers,
+      handshakeTimeout: 15000,
+    });
+
+    client.on("message", (data, isBinary) => {
+      if (upstream.readyState === WebSocket.OPEN) {
+        upstream.send(data, { binary: isBinary });
+      }
+    });
+    upstream.on("message", (data, isBinary) => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(data, { binary: isBinary });
+      }
+    });
+    client.on("close", (code, reason) => {
+      if (upstream.readyState === WebSocket.OPEN) upstream.close(code, reason);
+      else upstream.terminate();
+    });
+    upstream.on("close", (code, reason) => {
+      if (client.readyState === WebSocket.OPEN) client.close(code, reason);
+    });
+    upstream.on("error", () => {
+      if (client.readyState === WebSocket.OPEN)
+        client.close(1011, "Upstream WebSocket error");
+    });
+    client.on("error", () => upstream.terminate());
+  });
 });
