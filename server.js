@@ -67,8 +67,12 @@ const parseRequestUrl = (request) => {
 
   // Forma legible: /proxy/https/ejemplo.com/ruta.
   const match = request.path.match(/^\/proxy\/(https?)\/([^/]+)(\/.*)?$/);
-  // Si ninguna forma coincide, la petición no contiene un destino válido.
-  if (!match) throw new Error("La URL no es válida.");
+  if (!match) {
+    // Recursos creados por el sitio pueden pedir /static o /textures al origen del proxy.
+    const originalReferer = getOriginalReferer(request);
+    if (originalReferer) return new URL(request.originalUrl, originalReferer);
+    throw new Error("La URL no es válida.");
+  }
 
   // request.url también conserva la query string que no aparece en path.
   return new URL(
@@ -425,6 +429,12 @@ app.all("/proxy", express.raw({ type: "*/*", limit: "25mb" }), proxyRequest);
 // Ruta legible que incorpora protocolo, host, ruta y query en el path.
 app.all(
   /^\/proxy\/(https?)\/([^/]+)(\/.*)?$/,
+  express.raw({ type: "*/*", limit: "25mb" }),
+  proxyRequest,
+);
+// Recupera recursos root-relative que el navegador solicita al origen del proxy.
+app.all(
+  /^\/(?!proxy(?:\/|$)).*/,
   express.raw({ type: "*/*", limit: "25mb" }),
   proxyRequest,
 );
