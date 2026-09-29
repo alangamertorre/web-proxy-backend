@@ -69,7 +69,8 @@ const parseRequestUrl = (request) => {
   const match = request.path.match(/^\/proxy\/(https?)\/([^/]+)(\/.*)?$/);
   if (!match) {
     // Recursos creados por el sitio pueden pedir /static o /textures al origen del proxy.
-    const originalReferer = getOriginalReferer(request);
+    const originalReferer =
+      getOriginalReferer(request) || getProxyOriginCookie(request);
     if (originalReferer) return new URL(request.originalUrl, originalReferer);
     throw new Error("La URL no es válida.");
   }
@@ -97,6 +98,27 @@ const getOriginalReferer = (request) => {
     if (!match) return null;
 
     return new URL(`${match[1]}://${match[2]}${match[3] || "/"}`);
+  } catch {
+    return null;
+  }
+};
+
+// Usa el origen guardado al cargar HTML cuando el navegador omite Referer.
+const getProxyOriginCookie = (request) => {
+  const cookie = request.headers.cookie
+    ?.split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith("proxy_fallback_origin="));
+  if (!cookie) return null;
+
+  try {
+    const encodedOrigin = cookie.split("=").slice(1).join("=");
+    const origin = Buffer.from(encodedOrigin, "base64url").toString();
+    const url = new URL(origin);
+    if (!["http:", "https:"].includes(url.protocol) || url.origin !== origin) {
+      return null;
+    }
+    return url;
   } catch {
     return null;
   }
@@ -378,6 +400,17 @@ const proxyRequest = async (request, response) => {
       });
 
       // Conservamos el status HTTP, pero servimos el HTML ya transformado.
+      response.cookie(
+        "proxy_fallback_origin",
+        Buffer.from(destination.origin).toString("base64url"),
+        {
+          httpOnly: true,
+          secure: proxyOrigin.startsWith("https:"),
+          sameSite: "lax",
+          path: "/",
+          maxAge: 10 * 60 * 1000,
+        },
+      );
       response.status(upstream.status).type("html").send(document.html());
       return;
     }
